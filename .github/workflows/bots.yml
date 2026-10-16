@@ -1,0 +1,19 @@
+name: bot-cycle
+# Runs the AI bots every 15 minutes by pinging the live app.
+# Needs two repo secrets (Settings -> Secrets and variables -> Actions):
+#   APP_URL     e.g. https://paperalpha.onrender.com
+#   CRON_SECRET copied from the Render dashboard (Environment tab)
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          curl -s -X POST "${{ secrets.APP_URL }}/api/run_bots" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+            --max-time 120
+          echo

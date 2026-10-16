@@ -1,6 +1,7 @@
 """FastAPI server: dashboard API + serves mobile frontend."""
 import os, time
-from fastapi import FastAPI
+from typing import Optional
+from fastapi import FastAPI, BackgroundTasks, Header
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -73,6 +74,16 @@ def api_reset():
     c.execute("UPDATE bot_stats SET trades=0, wins=0, total_pnl=0, weight=1.0")
     c.commit(); c.close()
     return {"ok": True}
+
+@app.post("/api/run_bots")
+def api_run_bots(background: BackgroundTasks, x_cron_secret: Optional[str] = Header(default=None)):
+    """Trigger a bot trading cycle. Called by the scheduled GitHub Action."""
+    expected = os.environ.get("CRON_SECRET", "")
+    if expected and x_cron_secret != expected:
+        return {"ok": False, "error": "unauthorized"}
+    from bot_runner import run_cycle
+    background.add_task(run_cycle)
+    return {"ok": True, "started": True}
 
 app.mount("/static", StaticFiles(directory=FRONT), name="static")
 
