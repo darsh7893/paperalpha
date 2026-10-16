@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PaperAlpha — AI Paper Trading</title>
+<link rel="manifest" href="/static/manifest.json">
+<meta name="theme-color" content="#0a0f1e">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="logo">📈 PaperAlpha</div>
+  <div class="sub">AI paper trading · virtual $100k · no real money</div>
+</header>
+
+<section class="card hero">
+  <div class="label">Equity</div>
+  <div class="equity" id="equity">—</div>
+  <div class="pnl" id="pnl">—</div>
+  <div class="row"><span>Cash</span><b id="cash">—</b></div>
+</section>
+
+<section class="card">
+  <h2>🤖 Bot brain</h2>
+  <div id="bots" class="bots"></div>
+  <div class="hint">Weights shift toward whichever bot actually wins. It learns from every closed trade.</div>
+</section>
+
+<section class="card">
+  <h2>💼 Positions</h2>
+  <div id="positions"><div class="empty">No open positions yet.</div></div>
+  <button id="sellAll" class="danger">Sell everything</button>
+</section>
+
+<section class="card">
+  <h2>👀 Watchlist</h2>
+  <div id="watch"></div>
+</section>
+
+<section class="card">
+  <h2>🧾 Recent trades</h2>
+  <div id="trades"></div>
+</section>
+
+<footer>Paper trading only. Not financial advice.</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>
