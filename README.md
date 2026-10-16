@@ -4,12 +4,22 @@ Mobile-first paper trading platform with learning AI bots. **No real money. Virt
 
 ## What it does
 - 📱 Mobile-friendly web app (installable PWA — use from your phone browser)
-- 🤖 3 bots that paper-trade automatically:
+- 🔐 Login + multi-user: everyone who signs up gets their own virtual $100,000. First signup is admin.
+- 🤖 3 bots that paper-trade automatically (per user, toggleable in the app):
   - **News Sentiment Bot** — reads headlines, scores sentiment, bets on momentum
   - **Momentum Bot** — SMA crossover + RSI strategy
   - **Ensemble Learner** — tracks which bot/params win, shifts capital to winners over time (it *learns*)
 - 📊 Live-ish prices (free Yahoo Finance), portfolio dashboard, trade history
 - 🧪 100% paper trading — no broker, no real orders
+
+## What "AI" is actually in here (no API keys needed)
+- **News bot:** VADER, a small NLP sentiment model running locally — scores headlines −1…+1. No LLM, no API.
+- **Momentum bot:** not AI at all — pure math (moving averages + RSI).
+- **Learner:** genuine online machine learning — an epsilon-greedy multi-armed bandit that reallocates
+  capital toward whichever bot actually makes money, plus tiny evolutionary mutations of the loser's
+  parameters. It learns from experience, not from pretraining.
+- Not in here (yet): LLM reasoning / deep-learning price prediction. A Groq free-tier "analyst agent"
+  that writes a rationale per trade would be the natural next upgrade — the engine is already modular for it.
 
 ## Free alternatives in the market
 | Tool | Free? | What it is |

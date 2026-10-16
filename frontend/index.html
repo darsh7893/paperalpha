@@ -14,11 +14,27 @@
   <div class="sub">AI paper trading · virtual $100k · no real money</div>
 </header>
 
+<section class="card" id="auth">
+  <h2>🔐 Log in</h2>
+  <div class="tabs">
+    <button id="tabLogin" class="tab active" type="button">Log in</button>
+    <button id="tabRegister" class="tab" type="button">Sign up</button>
+  </div>
+  <input id="username" placeholder="username" autocomplete="username">
+  <input id="password" type="password" placeholder="password" autocomplete="current-password">
+  <div class="err" id="authErr"></div>
+  <button id="authGo">Log in</button>
+  <div class="hint">First account to sign up becomes the admin. Everyone gets a virtual $100,000.</div>
+</section>
+
+<div id="app" style="display:none">
+
 <section class="card hero">
-  <div class="label">Equity</div>
+  <div class="label">Equity <span id="who" class="who"></span></div>
   <div class="equity" id="equity">—</div>
   <div class="pnl" id="pnl">—</div>
   <div class="row"><span>Cash</span><b id="cash">—</b></div>
+  <div class="row"><span>🤖 Bots trade for me</span><button id="botToggle" class="mini">…</button></div>
 </section>
 
 <section class="card">
@@ -42,6 +58,10 @@
   <h2>🧾 Recent trades</h2>
   <div id="trades"></div>
 </section>
+
+<button id="logout" class="ghost">Log out</button>
+
+</div>
 
 <footer>Paper trading only. Not financial advice.</footer>
 <script src="/static/app.js"></script>

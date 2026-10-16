@@ -1,4 +1,35 @@
-async function j(url, opts){ const r = await fetch(url, opts); return r.json(); }
+async function j(url, opts){
+  const r = await fetch(url, opts);
+  if (r.status === 401) throw new Error('auth');
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.detail || 'error');
+  return d;
+}
+
+let mode = 'login';
+const authEl = document.getElementById('auth');
+const appEl = document.getElementById('app');
+
+function setMode(m){
+  mode = m;
+  document.getElementById('tabLogin').classList.toggle('active', m === 'login');
+  document.getElementById('tabRegister').classList.toggle('active', m === 'register');
+  document.getElementById('authGo').textContent = m === 'login' ? 'Log in' : 'Sign up';
+}
+document.getElementById('tabLogin').onclick = () => setMode('login');
+document.getElementById('tabRegister').onclick = () => setMode('register');
+
+document.getElementById('authGo').onclick = async () => {
+  const u = document.getElementById('username').value;
+  const p = document.getElementById('password').value;
+  const err = document.getElementById('authErr');
+  err.textContent = '';
+  try {
+    await j('/api/' + mode, {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: u, password: p})});
+    boot();
+  } catch (e) { err.textContent = e.message === 'auth' ? 'session expired' : e.message; }
+};
 
 async function refresh(){
   const s = await j('/api/status');
@@ -47,11 +78,38 @@ async function refresh(){
     return `<div class="titem"><b>${x.side.toUpperCase()}</b> ${x.qty} ${x.symbol} @ $${x.price.toFixed(2)} · ${x.bot}<br>
       <span style="color:#5b6378">${d} — ${x.reason || ''}${x.pnl ? ' · P&L $'+x.pnl.toFixed(2) : ''}</span></div>`;
   }).join('') : '<div class="empty">No trades yet. Bots run every 15 min.</div>';
+
+  const set = await j('/api/settings');
+  const bt = document.getElementById('botToggle');
+  bt.textContent = set.bot_enabled ? 'ON' : 'OFF';
+  bt.classList.toggle('on', set.bot_enabled);
+  bt.onclick = async () => {
+    const r = await j('/api/settings', {method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({bot_enabled: !set.bot_enabled})});
+    bt.textContent = r.bot_enabled ? 'ON' : 'OFF';
+    bt.classList.toggle('on', r.bot_enabled);
+  };
 }
 
-document.getElementById('sellAll').onclick = async () => {
-  if (confirm('Sell all positions?')) { await j('/api/sell_all', {method:'POST'}); refresh(); }
-};
+async function boot(){
+  try {
+    const me = await j('/api/me');
+    document.getElementById('who').textContent = '· ' + me.username + (me.is_admin ? ' (admin)' : '');
+    authEl.style.display = 'none';
+    appEl.style.display = 'block';
+    document.getElementById('sellAll').onclick = async () => {
+      if (confirm('Sell all positions?')) { await j('/api/sell_all', {method:'POST'}); refresh(); }
+    };
+    document.getElementById('logout').onclick = async () => {
+      await j('/api/logout', {method: 'POST'});
+      location.reload();
+    };
+    refresh();
+    setInterval(refresh, 30000);
+  } catch (e) {
+    authEl.style.display = 'block';
+    appEl.style.display = 'none';
+  }
+}
 
-refresh();
-setInterval(refresh, 30000);
+boot();

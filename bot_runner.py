@@ -1,4 +1,4 @@
-"""Background bot loop. Run on a schedule (cron / Render cron job).
+"""Background bot loop. Run on a schedule (cron / GitHub Actions).
 
     python bot_runner.py --once   # one cycle now
     python bot_runner.py          # loop every 15 minutes
@@ -13,26 +13,29 @@ db.init()
 
 def run_cycle():
     w = weights(); p = params()
-    actions = []
-    # individual bots vote; ensemble executes the weighted decision
-    for sym, act, usd, reason in ensemble_signals(w, p):
-        if act == "buy":
-            r = engine.buy(sym, usd, bot="ensemble", reason=reason[:300])
-        else:
-            r = engine.sell(sym, bot="ensemble", reason=reason[:300])
-        actions.append((sym, act, r))
-    # also let each bot paper-trade a tiny sleeve so learner has per-bot data
-    for bot_name, fn in (("momentum", momentum_signals), ("news", news_signals)):
-        for sym, act, usd, reason in fn((p.get(bot_name) or {}))[:2]:
+    users = db.bot_users()
+    admin = db.admin_user()
+    admin_id = admin["id"] if admin else None
+    for u in users:
+        uid = u["id"]
+        for sym, act, usd, reason in ensemble_signals(w, p):
             if act == "buy":
-                engine.buy(sym, min(usd, 500), bot=bot_name, reason=reason[:300])
+                engine.buy(uid, sym, usd, bot="ensemble", reason=reason[:300])
             else:
-                # don't dump ensemble positions from sleeves; only close bot's own tiny buys
-                pass
+                engine.sell(uid, sym, bot="ensemble", reason=reason[:300])
+        # per-bot sleeves (learning data) run only on the admin account
+        if uid == admin_id:
+            for bot_name, fn in (("momentum", momentum_signals), ("news", news_signals)):
+                for sym, act, usd, reason in fn((p.get(bot_name) or {}))[:2]:
+                    if act == "buy":
+                        engine.buy(uid, sym, min(usd, 500), bot=bot_name, reason=reason[:300])
     scores = reweight()
-    eq, cash = engine.equity()
-    print(f"cycle done: equity=${eq:,.0f} cash=${cash:,.0f} weights={w} scores={scores}")
-    return actions
+    info = []
+    for u in users:
+        eq, cash = engine.equity(u["id"])
+        info.append(f"{u['username']}=${eq:,.0f}")
+    print(f"cycle done: {' '.join(info)} scores={scores}")
+    return True
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()

@@ -1,8 +1,9 @@
-"""SQLite storage for portfolio, trades, bot performance."""
-import sqlite3, os, time, json
+"""SQLite storage: users, sessions, per-user paper portfolios, trades, bot stats."""
+import sqlite3, os, time, json, hashlib, hmac, secrets
 
 DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "..", "trades.db"))
 DB_PATH = os.path.abspath(DB_PATH)
+SCHEMA_VERSION = 2
 
 def conn():
     c = sqlite3.connect(DB_PATH)
@@ -11,78 +12,198 @@ def conn():
 
 def init():
     c = conn()
-    c.executescript("""
-    CREATE TABLE IF NOT EXISTS portfolio (
-        id INTEGER PRIMARY KEY CHECK (id=1),
-        cash REAL NOT NULL DEFAULT 100000,
-        updated_at REAL
-    );
-    CREATE TABLE IF NOT EXISTS positions (
-        symbol TEXT PRIMARY KEY,
-        qty REAL NOT NULL DEFAULT 0,
-        avg_price REAL NOT NULL DEFAULT 0
-    );
-    CREATE TABLE IF NOT EXISTS trades (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts REAL, symbol TEXT, side TEXT, qty REAL, price REAL,
-        bot TEXT, reason TEXT, pnl REAL DEFAULT 0
-    );
-    CREATE TABLE IF NOT EXISTS bot_stats (
-        bot TEXT PRIMARY KEY,
-        trades INTEGER DEFAULT 0, wins INTEGER DEFAULT 0,
-        total_pnl REAL DEFAULT 0, weight REAL DEFAULT 1.0,
-        params TEXT DEFAULT '{}', updated_at REAL
-    );
-    CREATE TABLE IF NOT EXISTS prices (
-        symbol TEXT, ts REAL, price REAL,
-        PRIMARY KEY (symbol, ts)
-    );
-    """)
-    c.execute("INSERT OR IGNORE INTO portfolio (id, cash, updated_at) VALUES (1, 100000, ?)", (time.time(),))
-    for bot in ("news", "momentum", "ensemble"):
-        c.execute("INSERT OR IGNORE INTO bot_stats (bot, updated_at) VALUES (?, ?)", (bot, time.time()))
+    c.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)")
+    row = c.execute("SELECT v FROM meta WHERE k='schema_version'").fetchone()
+    ver = int(row["v"]) if row else 0
+    if ver < SCHEMA_VERSION:
+        # Experiment stage: rebuild into the multi-user schema.
+        c.executescript("""
+        DROP TABLE IF EXISTS portfolio;
+        DROP TABLE IF EXISTS positions;
+        DROP TABLE IF EXISTS trades;
+        CREATE TABLE users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            pass_hash TEXT NOT NULL,
+            salt TEXT NOT NULL,
+            is_admin INTEGER DEFAULT 0,
+            bot_enabled INTEGER DEFAULT 1,
+            created_at REAL
+        );
+        CREATE TABLE sessions (
+            token TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            created_at REAL
+        );
+        CREATE TABLE portfolio (
+            user_id INTEGER PRIMARY KEY,
+            cash REAL NOT NULL DEFAULT 100000,
+            updated_at REAL
+        );
+        CREATE TABLE positions (
+            user_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            qty REAL NOT NULL DEFAULT 0,
+            avg_price REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, symbol)
+        );
+        CREATE TABLE trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            ts REAL, symbol TEXT, side TEXT, qty REAL, price REAL,
+            bot TEXT, reason TEXT, pnl REAL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS bot_stats (
+            bot TEXT PRIMARY KEY,
+            trades INTEGER DEFAULT 0, wins INTEGER DEFAULT 0,
+            total_pnl REAL DEFAULT 0, weight REAL DEFAULT 1.0,
+            params TEXT DEFAULT '{}', updated_at REAL
+        );
+        CREATE TABLE IF NOT EXISTS prices (
+            symbol TEXT, ts REAL, price REAL,
+            PRIMARY KEY (symbol, ts)
+        );
+        """)
+        for bot in ("news", "momentum", "ensemble"):
+            c.execute("INSERT OR IGNORE INTO bot_stats (bot, updated_at) VALUES (?, ?)", (bot, time.time()))
+        c.execute("INSERT OR REPLACE INTO meta (k, v) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
     c.commit(); c.close()
 
-def get_cash():
-    c = conn(); r = c.execute("SELECT cash FROM portfolio WHERE id=1").fetchone(); c.close()
-    return r["cash"]
+# ---------- auth ----------
 
-def set_cash(v):
-    c = conn(); c.execute("UPDATE portfolio SET cash=?, updated_at=? WHERE id=1", (v, __import__("time").time())); c.commit(); c.close()
+def _hash(password, salt_hex):
+    return hashlib.pbkdf2_hmac("sha256", password.encode(),
+                               bytes.fromhex(salt_hex), 200_000).hex()
 
-def get_positions():
-    c = conn(); rows = c.execute("SELECT * FROM positions WHERE qty != 0").fetchall(); c.close()
+def create_user(username, password):
+    username = (username or "").strip().lower()
+    if len(username) < 3:
+        return None, "username must be 3+ characters"
+    if len(password or "") < 4:
+        return None, "password must be 4+ characters"
+    salt = secrets.token_hex(16)
+    ph = _hash(password, salt)
+    c = conn()
+    n = c.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+    try:
+        cur = c.execute(
+            "INSERT INTO users(username, pass_hash, salt, is_admin, created_at) VALUES(?,?,?,?,?)",
+            (username, ph, salt, 1 if n == 0 else 0, time.time()))
+        uid = cur.lastrowid
+    except sqlite3.IntegrityError:
+        c.close(); return None, "username taken"
+    c.execute("INSERT INTO portfolio(user_id, cash, updated_at) VALUES(?,?,?)",
+              (uid, 100000, time.time()))
+    c.commit(); c.close()
+    return uid, None
+
+def verify_user(username, password):
+    c = conn()
+    r = c.execute("SELECT * FROM users WHERE username=?", ((username or "").strip().lower(),)).fetchone()
+    c.close()
+    if not r:
+        return None
+    if hmac.compare_digest(_hash(password or "", r["salt"]), r["pass_hash"]):
+        return dict(r)
+    return None
+
+def create_session(user_id):
+    tok = secrets.token_hex(32)
+    c = conn()
+    c.execute("INSERT INTO sessions(token, user_id, created_at) VALUES(?,?,?)",
+              (tok, user_id, time.time()))
+    c.commit(); c.close()
+    return tok
+
+def session_user(token):
+    if not token:
+        return None
+    c = conn()
+    r = c.execute("SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?",
+                  (token,)).fetchone()
+    c.close()
+    return dict(r) if r else None
+
+def delete_session(token):
+    c = conn(); c.execute("DELETE FROM sessions WHERE token=?", (token,)); c.commit(); c.close()
+
+def set_bot_enabled(user_id, enabled):
+    c = conn()
+    c.execute("UPDATE users SET bot_enabled=? WHERE id=?", (1 if enabled else 0, user_id))
+    c.commit(); c.close()
+
+def bot_users():
+    c = conn()
+    rows = c.execute("SELECT * FROM users WHERE bot_enabled=1").fetchall()
+    c.close()
     return [dict(r) for r in rows]
 
-def get_position(sym):
-    c = conn(); r = c.execute("SELECT * FROM positions WHERE symbol=?", (sym,)).fetchone(); c.close()
+def admin_user():
+    c = conn()
+    r = c.execute("SELECT * FROM users WHERE is_admin=1 ORDER BY id LIMIT 1").fetchone()
+    c.close()
+    return dict(r) if r else None
+
+# ---------- per-user portfolio ----------
+
+def get_cash(uid):
+    c = conn(); r = c.execute("SELECT cash FROM portfolio WHERE user_id=?", (uid,)).fetchone(); c.close()
+    return r["cash"] if r else 100000
+
+def set_cash(uid, v):
+    c = conn()
+    c.execute("INSERT INTO portfolio(user_id, cash, updated_at) VALUES(?,?,?) "
+              "ON CONFLICT(user_id) DO UPDATE SET cash=?, updated_at=?",
+              (uid, v, time.time(), v, time.time()))
+    c.commit(); c.close()
+
+def get_positions(uid):
+    c = conn(); rows = c.execute("SELECT * FROM positions WHERE user_id=? AND qty != 0", (uid,)).fetchall(); c.close()
+    return [dict(r) for r in rows]
+
+def get_position(uid, sym):
+    c = conn(); r = c.execute("SELECT * FROM positions WHERE user_id=? AND symbol=?", (uid, sym)).fetchone(); c.close()
     return dict(r) if r else {"symbol": sym, "qty": 0, "avg_price": 0}
 
-def upsert_position(sym, qty, avg_price):
+def upsert_position(uid, sym, qty, avg_price):
     c = conn()
     if qty == 0:
-        c.execute("DELETE FROM positions WHERE symbol=?", (sym,))
+        c.execute("DELETE FROM positions WHERE user_id=? AND symbol=?", (uid, sym))
     else:
-        c.execute("INSERT INTO positions(symbol,qty,avg_price) VALUES(?,?,?) ON CONFLICT(symbol) DO UPDATE SET qty=?,avg_price=?",
-                  (sym, qty, avg_price, qty, avg_price))
+        c.execute("INSERT INTO positions(user_id, symbol, qty, avg_price) VALUES(?,?,?,?) "
+                  "ON CONFLICT(user_id, symbol) DO UPDATE SET qty=?, avg_price=?",
+                  (uid, sym, qty, avg_price, qty, avg_price))
     c.commit(); c.close()
 
-def log_trade(ts, symbol, side, qty, price, bot, reason, pnl=0):
+def log_trade(uid, ts, symbol, side, qty, price, bot, reason, pnl=0):
     c = conn()
-    c.execute("INSERT INTO trades(ts,symbol,side,qty,price,bot,reason,pnl) VALUES(?,?,?,?,?,?,?,?)",
-              (ts, symbol, side, qty, price, bot, reason, pnl))
+    c.execute("INSERT INTO trades(user_id, ts, symbol, side, qty, price, bot, reason, pnl) "
+              "VALUES(?,?,?,?,?,?,?,?,?)",
+              (uid, ts, symbol, side, qty, price, bot, reason, pnl))
     c.commit(); c.close()
 
-def recent_trades(limit=100):
-    c = conn(); rows = c.execute("SELECT * FROM trades ORDER BY ts DESC LIMIT ?", (limit,)).fetchall(); c.close()
+def recent_trades(uid, limit=100):
+    c = conn()
+    rows = c.execute("SELECT * FROM trades WHERE user_id=? ORDER BY ts DESC LIMIT ?", (uid, limit)).fetchall()
+    c.close()
     return [dict(r) for r in rows]
+
+def reset_account(uid):
+    c = conn()
+    c.execute("DELETE FROM positions WHERE user_id=?", (uid,))
+    c.execute("DELETE FROM trades WHERE user_id=?", (uid,))
+    c.execute("INSERT INTO portfolio(user_id, cash, updated_at) VALUES(?,?,?) "
+              "ON CONFLICT(user_id) DO UPDATE SET cash=?, updated_at=?",
+              (uid, 100000, time.time(), 100000, time.time()))
+    c.commit(); c.close()
+
+# ---------- bot stats (global) ----------
 
 def get_bot_stats():
     c = conn(); rows = c.execute("SELECT * FROM bot_stats").fetchall(); c.close()
     return {r["bot"]: dict(r) for r in rows}
 
 def update_bot_stats(bot, won, pnl, weight=None, params=None):
-    import time, json
     c = conn()
     s = c.execute("SELECT * FROM bot_stats WHERE bot=?", (bot,)).fetchone()
     trades = (s["trades"] or 0) + 1

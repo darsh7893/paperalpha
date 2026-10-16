@@ -33,3 +33,13 @@ button.danger{background:#3a1620;color:#f87171;border:1px solid #7f1d1d}
 .titem:last-child{border:none}
 .titem b{color:#e8ecf4}
 footer{text-align:center;color:#5b6378;font-size:11px;margin-top:18px}
+.tabs{display:flex;gap:8px;margin-bottom:10px}
+.tab{flex:1;background:#0d1428;color:#8b93a7;border:1px solid #223055}
+.tab.active{background:#6366f1;color:#fff;border-color:#6366f1}
+input{width:100%;background:#0d1428;border:1px solid #223055;color:#e8ecf4;border-radius:10px;padding:11px 12px;font-size:15px;margin-bottom:10px}
+input:focus{outline:none;border-color:#6366f1}
+.err{color:#f87171;font-size:13px;min-height:18px;margin-bottom:4px}
+.who{color:#8b93a7;font-weight:400;font-size:12px}
+button.mini{width:auto;padding:5px 14px;margin:0;font-size:13px;background:#1c2547;color:#8b93a7;border:1px solid #223055}
+button.mini.on{background:#052e22;color:#34d399;border-color:#065f46}
+button.ghost{background:transparent;color:#8b93a7;border:1px solid #223055}
