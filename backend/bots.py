@@ -1,6 +1,6 @@
 """Bot strategies. Each returns a list of (symbol, action, usd, reason)."""
 from .data import get_history, WATCHLIST
-from .news import get_news_sentiment
+from .news import get_sentiments
 
 def momentum_signals(params=None):
     """SMA crossover + RSI filter."""
@@ -33,10 +33,11 @@ def news_signals(params=None):
     p = params or {}
     buy_th = p.get("buy_th", 0.25)
     sell_th = p.get("sell_th", -0.25)
+    sents = get_sentiments(WATCHLIST)
     out = []
     for sym in WATCHLIST:
         try:
-            score, heads = get_news_sentiment(sym)
+            score, heads = sents.get(sym, (0.0, []))
             hl = (heads[0][:80] + "…") if heads else "no headlines"
             if score >= buy_th:
                 out.append((sym, "buy", 1500, f"news {score:+.2f}: {hl}"))

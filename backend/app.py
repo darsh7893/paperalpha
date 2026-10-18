@@ -100,12 +100,20 @@ def status(u: dict = Depends(current_user)):
 
 @app.get("/api/watchlist")
 def watchlist(u: dict = Depends(current_user)):
+    from concurrent.futures import ThreadPoolExecutor
+    from .data import get_prices
+    from .news import get_sentiments
+    # prices + news concurrently so a slow source can't stack delays.
+    # News is nice-to-have: give it a shorter bound than prices.
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        fp = ex.submit(get_prices, WATCHLIST)
+        fs = ex.submit(get_sentiments, WATCHLIST, 12)
+        prices, sents = fp.result(), fs.result()
     out = []
     for s in WATCHLIST:
-        px = get_price(s)
-        sent, heads = get_news_sentiment(s)
-        out.append({"symbol": s, "price": px,
-                    "sentiment": round(sent, 2),
+        score, heads = sents.get(s, (0.0, []))
+        out.append({"symbol": s, "price": prices.get(s),
+                    "sentiment": round(score, 2),
                     "headline": heads[0] if heads else ""})
     return out
 
