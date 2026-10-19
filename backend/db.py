@@ -1,9 +1,9 @@
-"""SQLite storage: users, sessions, per-user paper portfolios, trades, bot stats.
+"""Storage: users, sessions, per-user paper portfolios, trades, bot stats.
 
-Persistence: by default a local SQLite file (fine for dev). Set TURSO_URL +
-TURSO_AUTH_TOKEN to use a free Turso cloud database instead — required for
-hosted deploys, because Render's free tier wipes the local filesystem (and
-with it every account) on each redeploy.
+Persistence: by default a local SQLite file (fine for dev). Set DATABASE_URL
+to use Postgres (e.g. free Neon) instead — required for hosted deploys,
+because Render's free tier wipes the local filesystem (and with it every
+account) on each redeploy.
 """
 import sqlite3, os, time, json, hashlib, hmac, secrets, threading
 
@@ -11,83 +11,128 @@ DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), ".."
 DB_PATH = os.path.abspath(DB_PATH)
 SCHEMA_VERSION = 2
 
-_TURSO_URL = os.environ.get("TURSO_URL", "").strip()
-_TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN", "").strip()
+_PG_URL = os.environ.get("DATABASE_URL", "").strip()
 _tls = threading.local()
 
 
-class _Row:
-    """Dict-like row for libsql results (which come back as plain tuples)."""
-    __slots__ = ("_cols", "_vals")
-
-    def __init__(self, cols, vals):
-        self._cols = cols
-        self._vals = tuple(vals)
-
-    def __getitem__(self, k):
-        if isinstance(k, str):
-            return self._vals[self._cols.index(k)]
-        return self._vals[k]
-
-    def keys(self):
-        return list(self._cols)
-
-    def __iter__(self):
-        return iter(self._vals)
-
-    def __len__(self):
-        return len(self._vals)
+def _is_pg():
+    return bool(_PG_URL)
 
 
-class _TursoCursor:
-    def __init__(self, cur):
-        self._cur = cur
-        self._cols = [d[0] for d in (cur.description or [])]
-        self.lastrowid = getattr(cur, "lastrowid", None)
+class _PgResult:
+    """Prefetched rows; underlying cursor is already closed (no leaks)."""
 
-    def _wrap(self, row):
-        return _Row(self._cols, row) if row is not None else None
+    def __init__(self, rows):
+        self._rows = [dict(r) for r in rows]
+        self._i = 0
 
     def fetchone(self):
-        return self._wrap(self._cur.fetchone())
+        if self._i < len(self._rows):
+            r = self._rows[self._i]
+            self._i += 1
+            return r
+        return None
 
     def fetchall(self):
-        return [self._wrap(r) for r in self._cur.fetchall()]
+        r = self._rows[self._i:]
+        self._i = len(self._rows)
+        return r
 
 
-class _TursoConn:
-    """Mimics the sqlite3 bits of db.py over a libsql remote connection."""
+class _PgConn:
+    """Mimics the sqlite3 bits of db.py over psycopg2."""
 
     def __init__(self, raw):
         self._raw = raw
 
     def execute(self, sql, args=()):
-        # libsql requires a tuple (sqlite3 also accepts lists)
-        return _TursoCursor(self._raw.execute(sql, tuple(args or ())))
+        import psycopg2.extras
+        # sqlite uses ? placeholders; psycopg2 needs %s (no literal ?/% in our SQL)
+        cur = self._raw.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cur.execute(sql.replace("?", "%s"), tuple(args or ()))
+            rows = cur.fetchall() if cur.description else []
+            return _PgResult(rows)
+        finally:
+            cur.close()
 
     def executescript(self, sql):
         for stmt in (s.strip() for s in sql.split(";")):
             if stmt:
-                self._raw.execute(stmt)
+                self.execute(stmt)
 
     def commit(self):
-        self._raw.commit()
+        pass  # autocommit is on; explicit commits are harmless no-ops
 
     def close(self):
         pass  # pooled per thread; intentionally never closed
 
 
 def conn():
-    if _TURSO_URL and _TURSO_TOKEN:
-        c = getattr(_tls, "turso", None)
+    if _is_pg():
+        c = getattr(_tls, "pg", None)
         if c is None:
-            import libsql_experimental as libsql
-            c = _TursoConn(libsql.connect(database=_TURSO_URL, auth_token=_TURSO_TOKEN))
-            _tls.turso = c
+            import psycopg2
+            raw = psycopg2.connect(_PG_URL)
+            raw.autocommit = True
+            c = _PgConn(raw)
+            _tls.pg = c
         return c
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
     return c
+
+
+def _schema(pg):
+    auto = "SERIAL PRIMARY KEY" if pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    real = "DOUBLE PRECISION" if pg else "REAL"
+    return f"""
+        DROP TABLE IF EXISTS portfolio;
+        DROP TABLE IF EXISTS positions;
+        DROP TABLE IF EXISTS trades;
+        CREATE TABLE users (
+            id {auto},
+            username TEXT UNIQUE NOT NULL,
+            pass_hash TEXT NOT NULL,
+            salt TEXT NOT NULL,
+            is_admin INTEGER DEFAULT 0,
+            bot_enabled INTEGER DEFAULT 1,
+            created_at {real}
+        );
+        CREATE TABLE sessions (
+            token TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            created_at {real}
+        );
+        CREATE TABLE portfolio (
+            user_id INTEGER PRIMARY KEY,
+            cash {real} NOT NULL DEFAULT 100000,
+            updated_at {real}
+        );
+        CREATE TABLE positions (
+            user_id INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            qty {real} NOT NULL DEFAULT 0,
+            avg_price {real} NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, symbol)
+        );
+        CREATE TABLE trades (
+            id {auto},
+            user_id INTEGER NOT NULL,
+            ts {real}, symbol TEXT, side TEXT, qty {real}, price {real},
+            bot TEXT, reason TEXT, pnl {real} DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS bot_stats (
+            bot TEXT PRIMARY KEY,
+            trades INTEGER DEFAULT 0, wins INTEGER DEFAULT 0,
+            total_pnl {real} DEFAULT 0, weight {real} DEFAULT 1.0,
+            params TEXT DEFAULT '{{}}', updated_at {real}
+        );
+        CREATE TABLE IF NOT EXISTS prices (
+            symbol TEXT, ts {real}, price {real},
+            PRIMARY KEY (symbol, ts)
+        );
+        """
 
 def init():
     c = conn()
@@ -96,56 +141,18 @@ def init():
     ver = int(row["v"]) if row else 0
     if ver < SCHEMA_VERSION:
         # Experiment stage: rebuild into the multi-user schema.
-        c.executescript("""
-        DROP TABLE IF EXISTS portfolio;
-        DROP TABLE IF EXISTS positions;
-        DROP TABLE IF EXISTS trades;
-        CREATE TABLE users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            pass_hash TEXT NOT NULL,
-            salt TEXT NOT NULL,
-            is_admin INTEGER DEFAULT 0,
-            bot_enabled INTEGER DEFAULT 1,
-            created_at REAL
-        );
-        CREATE TABLE sessions (
-            token TEXT PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            created_at REAL
-        );
-        CREATE TABLE portfolio (
-            user_id INTEGER PRIMARY KEY,
-            cash REAL NOT NULL DEFAULT 100000,
-            updated_at REAL
-        );
-        CREATE TABLE positions (
-            user_id INTEGER NOT NULL,
-            symbol TEXT NOT NULL,
-            qty REAL NOT NULL DEFAULT 0,
-            avg_price REAL NOT NULL DEFAULT 0,
-            PRIMARY KEY (user_id, symbol)
-        );
-        CREATE TABLE trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            ts REAL, symbol TEXT, side TEXT, qty REAL, price REAL,
-            bot TEXT, reason TEXT, pnl REAL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS bot_stats (
-            bot TEXT PRIMARY KEY,
-            trades INTEGER DEFAULT 0, wins INTEGER DEFAULT 0,
-            total_pnl REAL DEFAULT 0, weight REAL DEFAULT 1.0,
-            params TEXT DEFAULT '{}', updated_at REAL
-        );
-        CREATE TABLE IF NOT EXISTS prices (
-            symbol TEXT, ts REAL, price REAL,
-            PRIMARY KEY (symbol, ts)
-        );
-        """)
+        c.executescript(_schema(_is_pg()))
         for bot in ("news", "momentum", "ensemble"):
-            c.execute("INSERT OR IGNORE INTO bot_stats (bot, updated_at) VALUES (?, ?)", (bot, time.time()))
-        c.execute("INSERT OR REPLACE INTO meta (k, v) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+            if _is_pg():
+                c.execute("INSERT INTO bot_stats (bot, updated_at) VALUES (?, ?) ON CONFLICT (bot) DO NOTHING",
+                          (bot, time.time()))
+            else:
+                c.execute("INSERT OR IGNORE INTO bot_stats (bot, updated_at) VALUES (?, ?)", (bot, time.time()))
+        if _is_pg():
+            c.execute("INSERT INTO meta (k, v) VALUES ('schema_version', ?) "
+                      "ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v", (str(SCHEMA_VERSION),))
+        else:
+            c.execute("INSERT OR REPLACE INTO meta (k, v) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
     c.commit(); c.close()
 
 # ---------- auth ----------
@@ -165,14 +172,20 @@ def create_user(username, password):
     c = conn()
     n = c.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
     try:
-        cur = c.execute(
-            "INSERT INTO users(username, pass_hash, salt, is_admin, created_at) VALUES(?,?,?,?,?)",
-            (username, ph, salt, 1 if n == 0 else 0, time.time()))
-        uid = cur.lastrowid
+        if _is_pg():
+            cur = c.execute(
+                "INSERT INTO users(username, pass_hash, salt, is_admin, created_at) VALUES(?,?,?,?,?) RETURNING id",
+                (username, ph, salt, 1 if n == 0 else 0, time.time()))
+            uid = cur.fetchone()["id"]
+        else:
+            cur = c.execute(
+                "INSERT INTO users(username, pass_hash, salt, is_admin, created_at) VALUES(?,?,?,?,?)",
+                (username, ph, salt, 1 if n == 0 else 0, time.time()))
+            uid = cur.lastrowid
     except sqlite3.IntegrityError:
         c.close(); return None, "username taken"
     except Exception as e:
-        # libsql (Turso) raises its own error type for unique violations
+        # psycopg2 raises UniqueViolation for duplicate usernames
         c.close()
         if "unique" in str(e).lower():
             return None, "username taken"
