@@ -94,7 +94,6 @@ async function refreshWatch(){
     const w = await j('/api/watchlist');
     el.innerHTML = w.map(x => {
       const cls = sentClass(x.sentiment);
-      const up = x.spark && x.spark.length > 1 && x.spark[x.spark.length-1] >= x.spark[0];
       const buyBtn = x.price
         ? `<button data-buy="${x.symbol}" style="width:auto;padding:6px 10px;margin-top:6px">Buy $1k</button>`
         : `<div style="color:#5b6378;font-size:11px;margin-top:6px">price unavailable</div>`;
@@ -104,15 +103,12 @@ async function refreshWatch(){
             <span class="p" data-px="${x.price || 0}">$${x.price ? x.price.toFixed(2) : '—'}</span>
             <div style="color:#5b6378;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${x.headline ? '📰 ' + x.headline.slice(0,55) + '…' : ''}</div>
           </div>
-          <canvas class="spark" data-spark='${JSON.stringify(x.spark || [])}' data-up="${up ? 1 : 0}"></canvas>
+          <canvas class="spark" data-sym="${x.symbol}"></canvas>
           <div style="text-align:right"><span class="sent ${cls}">${x.sentiment > 0 ? '+' : ''}${x.sentiment}</span><br>${buyBtn}</div>
         </div>
         <div class="wdetail" hidden></div>
       </div>`;
     }).join('');
-    el.querySelectorAll('canvas.spark').forEach(cv => {
-      drawChart(cv, JSON.parse(cv.dataset.spark), cv.dataset.up === '1' ? '#22c55e' : '#ef4444');
-    });
     el.querySelectorAll('[data-buy]').forEach(b => b.onclick = async (e) => {
       e.stopPropagation();
       const r = await j('/api/buy', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({symbol: b.dataset.buy, usd: 1000})});
@@ -122,9 +118,23 @@ async function refreshWatch(){
     el.querySelectorAll('.witem .wrow').forEach(row => {
       row.onclick = () => toggleDetail(row.closest('.witem'));
     });
+    loadSparks();  // non-blocking: fills in after rows are visible
   } catch(e) {
     el.innerHTML = '<div class="empty">Market data is loading slowly — retrying…</div>';
   }
+}
+
+async function loadSparks(){
+  // lazy sparkline fill-in; rows already render instantly without it
+  try {
+    const sp = await j('/api/sparks');
+    document.querySelectorAll('canvas.spark').forEach(cv => {
+      const data = sp[cv.dataset.sym];
+      if (data && data.length > 1) {
+        drawChart(cv, data, data[data.length-1] >= data[0] ? '#22c55e' : '#ef4444');
+      }
+    });
+  } catch(e) { /* sparklines are decoration; ignore */ }
 }
 
 async function toggleDetail(item){

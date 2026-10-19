@@ -1,5 +1,5 @@
-"""Free news + sentiment. No API key needed (GDELT)."""
-import requests, time
+"""Free news + sentiment. No API key needed (Yahoo Finance RSS, Google News fallback)."""
+import requests, time, re, html
 from concurrent.futures import ThreadPoolExecutor, wait
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
@@ -7,25 +7,43 @@ _analyzer = SentimentIntensityAnalyzer()
 _cache = {}  # symbol -> (ts, score, headlines)
 CACHE_TTL = 900
 BATCH_TIMEOUT = 20
+UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
 
 
 def sentiment_score(text):
     return _analyzer.polarity_scores(text or "")["compound"]
 
 
-def _fetch(symbol, max_items=6):
-    headlines, scores = [], []
-    r = requests.get("https://api.gdeltproject.org/api/v2/doc/doc",
-                     params={"query": symbol, "mode": "ArtList",
-                             "maxrecords": max_items, "format": "json",
-                             "timespan": "24h"},
-                     timeout=10)
-    arts = r.json().get("articles", [])
-    for a in arts:
-        t = a.get("title", "")
+def _titles_from_rss(xml, max_items):
+    titles = []
+    for m in re.finditer(r"<item\b.*?</item>", xml, re.S | re.I):
+        t = re.search(r"<title>(.*?)</title>", m.group(0), re.S | re.I)
         if t:
-            headlines.append(t)
-            scores.append(sentiment_score(t))
+            raw = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", t.group(1), flags=re.S)
+            title = html.unescape(raw).strip()
+            if title:
+                titles.append(title)
+        if len(titles) >= max_items:
+            break
+    return titles
+
+
+def _fetch(symbol, max_items=6):
+    headlines = []
+    urls = [
+        f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US",
+        f"https://news.google.com/rss/search?q={symbol}+stock&hl=en-US&gl=US&ceid=US:en",
+    ]
+    for url in urls:
+        try:
+            r = requests.get(url, timeout=8, headers=UA)
+            if r.status_code == 200 and "<item" in r.text:
+                headlines = _titles_from_rss(r.text, max_items)
+                if headlines:
+                    break
+        except Exception:
+            continue
+    scores = [sentiment_score(t) for t in headlines]
     score = sum(scores) / len(scores) if scores else 0.0
     return score, headlines
 

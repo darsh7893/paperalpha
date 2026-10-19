@@ -103,23 +103,28 @@ def watchlist(u: dict = Depends(current_user)):
     from concurrent.futures import ThreadPoolExecutor
     from .data import get_prices, get_histories
     from .news import get_sentiments
-    # prices + news + sparklines concurrently so a slow source can't stack delays.
+    # prices + news concurrently so a slow source can't stack delays.
+    # Sparklines load lazily via /api/sparks AFTER rows render (non-blocking).
     # News is nice-to-have: give it a shorter bound than prices.
-    with ThreadPoolExecutor(max_workers=3) as ex:
+    with ThreadPoolExecutor(max_workers=2) as ex:
         fp = ex.submit(get_prices, WATCHLIST)
         fs = ex.submit(get_sentiments, WATCHLIST, 12)
-        fh = ex.submit(get_histories, WATCHLIST, "1mo", 15)
-        prices, sents, hists = fp.result(), fs.result(), fh.result()
+        prices, sents = fp.result(), fs.result()
     out = []
     for s in WATCHLIST:
         score, heads = sents.get(s, (0.0, []))
-        h = hists.get(s)
-        spark = [round(float(x), 2) for x in h.tolist()[-30:]] if h is not None and len(h) else []
         out.append({"symbol": s, "price": prices.get(s),
                     "sentiment": round(score, 2),
-                    "headline": heads[0] if heads else "",
-                    "spark": spark})
+                    "headline": heads[0] if heads else ""})
     return out
+
+@app.get("/api/sparks")
+def sparks(u: dict = Depends(current_user)):
+    """30 daily closes per symbol for sparklines. Lazy: called after rows render."""
+    from .data import get_histories
+    hists = get_histories(WATCHLIST, "1mo", 12)
+    return {s: [round(float(x), 2) for x in h.tolist()[-30:]]
+            for s, h in hists.items() if h is not None and len(h)}
 
 @app.get("/api/prices")
 def prices(u: dict = Depends(current_user)):
