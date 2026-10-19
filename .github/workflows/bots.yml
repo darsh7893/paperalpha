@@ -17,14 +17,19 @@ jobs:
             echo "APP_URL secret not set yet — skipping. Set APP_URL + CRON_SECRET in repo Settings > Secrets and variables > Actions to enable bot cycles."
             exit 0
           fi
-          code=$(curl -s -o /tmp/resp.txt -w "%{http_code}" -X POST "${{ secrets.APP_URL }}/api/run_bots" \
-            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
-            --max-time 120)
-          cat /tmp/resp.txt; echo
-          if [ "$code" = "000" ]; then
-            echo "App not reachable yet (Render deploy may still be running) — skipping without failing."
-            exit 0
+          # Retry loop: rides out Render cold starts (~60s) and mid-deploy
+          # transitions instead of failing the run on the first hiccup.
+          ok=0
+          for i in 1 2 3 4; do
+            code=$(curl -s -o /tmp/resp.txt -w "%{http_code}" -X POST "${{ secrets.APP_URL }}/api/run_bots" \
+              -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+              --max-time 90)
+            echo "attempt $i: HTTP $code"
+            cat /tmp/resp.txt; echo
+            if [ "$code" = "200" ]; then ok=1; break; fi
+            sleep 60
+          done
+          if [ "$ok" != "1" ]; then
+            echo "bot run failed after 4 attempts"; exit 1
           fi
-          if [ "$code" != "200" ]; then
-            echo "Unexpected HTTP $code from app"; exit 1
-          fi
+          echo "bot cycle triggered OK"
