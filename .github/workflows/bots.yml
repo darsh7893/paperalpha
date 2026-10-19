@@ -19,9 +19,12 @@ jobs:
           fi
           # Retry loop: rides out Render cold starts (~60s) and mid-deploy
           # transitions instead of failing the run on the first hiccup.
+          # Strip any trailing slash from APP_URL so the path never doubles up.
+          APP_URL="${{ secrets.APP_URL }}"
+          APP_URL="${APP_URL%/}"
           ok=0
           for i in 1 2 3 4; do
-            code=$(curl -s -o /tmp/resp.txt -w "%{http_code}" -X POST "${{ secrets.APP_URL }}/api/run_bots" \
+            code=$(curl -s -o /tmp/resp.txt -w "%{http_code}" -X POST "${APP_URL}/api/run_bots" \
               -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
               --max-time 90)
             echo "attempt $i: HTTP $code"
