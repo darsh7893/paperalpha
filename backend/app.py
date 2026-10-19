@@ -101,21 +101,73 @@ def status(u: dict = Depends(current_user)):
 @app.get("/api/watchlist")
 def watchlist(u: dict = Depends(current_user)):
     from concurrent.futures import ThreadPoolExecutor
-    from .data import get_prices
+    from .data import get_prices, get_histories
     from .news import get_sentiments
-    # prices + news concurrently so a slow source can't stack delays.
+    # prices + news + sparklines concurrently so a slow source can't stack delays.
     # News is nice-to-have: give it a shorter bound than prices.
-    with ThreadPoolExecutor(max_workers=2) as ex:
+    with ThreadPoolExecutor(max_workers=3) as ex:
         fp = ex.submit(get_prices, WATCHLIST)
         fs = ex.submit(get_sentiments, WATCHLIST, 12)
-        prices, sents = fp.result(), fs.result()
+        fh = ex.submit(get_histories, WATCHLIST, "1mo", 15)
+        prices, sents, hists = fp.result(), fs.result(), fh.result()
     out = []
     for s in WATCHLIST:
         score, heads = sents.get(s, (0.0, []))
+        h = hists.get(s)
+        spark = [round(float(x), 2) for x in h.tolist()[-30:]] if h is not None and len(h) else []
         out.append({"symbol": s, "price": prices.get(s),
                     "sentiment": round(score, 2),
-                    "headline": heads[0] if heads else ""})
+                    "headline": heads[0] if heads else "",
+                    "spark": spark})
     return out
+
+@app.get("/api/prices")
+def prices(u: dict = Depends(current_user)):
+    """Lightweight ticker for live updates: {symbol: price}."""
+    from .data import get_prices
+    return {s: p for s, p in get_prices(WATCHLIST, 12).items()}
+
+def _rsi(closes, n=14):
+    import pandas as pd
+    s = pd.Series(closes, dtype=float)
+    d = s.diff()
+    gain = d.clip(lower=0).rolling(n).mean()
+    loss = -d.clip(upper=0).rolling(n).mean()
+    rs = gain / (loss + 1e-9)
+    return float((100 - 100 / (1 + rs)).iloc[-1])
+
+_chart_cache = {}  # symbol -> (ts, payload)
+
+@app.get("/api/chart")
+def chart(symbol: str, u: dict = Depends(current_user)):
+    """6-month daily chart + stats for one symbol."""
+    from .data import get_history
+    sym = (symbol or "").upper()
+    if sym not in WATCHLIST:
+        raise HTTPException(400, "unknown symbol")
+    hit = _chart_cache.get(sym)
+    if hit and time.time() - hit[0] < 300:
+        return hit[1]
+    h = get_history(sym, "6mo")
+    if h is None or len(h) < 20:
+        raise HTTPException(503, "chart data unavailable")
+    closes = [float(x) for x in h.tolist()]
+    dates = [d.strftime("%b %d") for d in h.index]
+    last, prev = closes[-1], closes[-2]
+    sma20 = sum(closes[-20:]) / 20
+    rng = closes[-90:]
+    sent, heads = get_news_sentiment(sym)
+    payload = {
+        "symbol": sym, "price": round(last, 2),
+        "change_pct": round((last - prev) / prev * 100, 2),
+        "high_90": round(max(rng), 2), "low_90": round(min(rng), 2),
+        "vs_sma20_pct": round((last - sma20) / sma20 * 100, 1),
+        "rsi": round(_rsi(closes), 0),
+        "sentiment": round(sent, 2), "headline": heads[0] if heads else "",
+        "dates": dates[-90:], "closes": [round(c, 2) for c in closes[-90:]],
+    }
+    _chart_cache[sym] = (time.time(), payload)
+    return payload
 
 @app.get("/api/trades")
 def trades(limit: int = 50, u: dict = Depends(current_user)):
