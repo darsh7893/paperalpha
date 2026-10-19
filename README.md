@@ -50,6 +50,20 @@ python bot_runner.py              # loop every 15 min
 - **Railway / Fly.io:** `Dockerfile` included
 - Then open the URL on your phone → Add to Home Screen → it behaves like an app
 
+## Persistence (important!)
+Render's free tier wipes the local filesystem on every redeploy — without this,
+every account, trade, and the bots' learning would be deleted on each deploy.
+Set these two env vars (Render dashboard → service → Environment) to use a free
+Turso cloud database instead (accounts then survive redeploys forever):
+
+1. Sign up at turso.tech (GitHub login), create a database called `paperalpha`
+2. On the database page → Connect → copy the database URL (`libsql://...`)
+3. Create an auth token for the database and copy it
+4. In Render: add `TURSO_URL` = the database URL, `TURSO_AUTH_TOKEN` = the token
+5. Save (triggers a redeploy). Sign up fresh once in the app — that account now persists.
+
+Without these vars the app falls back to a local SQLite file (fine for local dev).
+
 ## How the learning works
 1. Every bot decision + outcome is logged to SQLite (`trades.db`)
 2. `learner.py` scores each strategy on rolling 7-day Sharpe / win-rate

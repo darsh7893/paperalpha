@@ -28,7 +28,7 @@ document.getElementById('authGo').onclick = async () => {
     await j('/api/' + mode, {method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({username: u, password: p})});
     boot();
-  } catch (e) { err.textContent = e.message === 'auth' ? 'session expired' : e.message; }
+  } catch (e) { err.textContent = e.message; }
 };
 
 async function refreshStatus(){

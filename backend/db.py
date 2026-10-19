@@ -1,11 +1,90 @@
-"""SQLite storage: users, sessions, per-user paper portfolios, trades, bot stats."""
-import sqlite3, os, time, json, hashlib, hmac, secrets
+"""SQLite storage: users, sessions, per-user paper portfolios, trades, bot stats.
+
+Persistence: by default a local SQLite file (fine for dev). Set TURSO_URL +
+TURSO_AUTH_TOKEN to use a free Turso cloud database instead — required for
+hosted deploys, because Render's free tier wipes the local filesystem (and
+with it every account) on each redeploy.
+"""
+import sqlite3, os, time, json, hashlib, hmac, secrets, threading
 
 DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "..", "trades.db"))
 DB_PATH = os.path.abspath(DB_PATH)
 SCHEMA_VERSION = 2
 
+_TURSO_URL = os.environ.get("TURSO_URL", "").strip()
+_TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN", "").strip()
+_tls = threading.local()
+
+
+class _Row:
+    """Dict-like row for libsql results (which come back as plain tuples)."""
+    __slots__ = ("_cols", "_vals")
+
+    def __init__(self, cols, vals):
+        self._cols = cols
+        self._vals = tuple(vals)
+
+    def __getitem__(self, k):
+        if isinstance(k, str):
+            return self._vals[self._cols.index(k)]
+        return self._vals[k]
+
+    def keys(self):
+        return list(self._cols)
+
+    def __iter__(self):
+        return iter(self._vals)
+
+    def __len__(self):
+        return len(self._vals)
+
+
+class _TursoCursor:
+    def __init__(self, cur):
+        self._cur = cur
+        self._cols = [d[0] for d in (cur.description or [])]
+        self.lastrowid = getattr(cur, "lastrowid", None)
+
+    def _wrap(self, row):
+        return _Row(self._cols, row) if row is not None else None
+
+    def fetchone(self):
+        return self._wrap(self._cur.fetchone())
+
+    def fetchall(self):
+        return [self._wrap(r) for r in self._cur.fetchall()]
+
+
+class _TursoConn:
+    """Mimics the sqlite3 bits of db.py over a libsql remote connection."""
+
+    def __init__(self, raw):
+        self._raw = raw
+
+    def execute(self, sql, args=()):
+        # libsql requires a tuple (sqlite3 also accepts lists)
+        return _TursoCursor(self._raw.execute(sql, tuple(args or ())))
+
+    def executescript(self, sql):
+        for stmt in (s.strip() for s in sql.split(";")):
+            if stmt:
+                self._raw.execute(stmt)
+
+    def commit(self):
+        self._raw.commit()
+
+    def close(self):
+        pass  # pooled per thread; intentionally never closed
+
+
 def conn():
+    if _TURSO_URL and _TURSO_TOKEN:
+        c = getattr(_tls, "turso", None)
+        if c is None:
+            import libsql_experimental as libsql
+            c = _TursoConn(libsql.connect(database=_TURSO_URL, auth_token=_TURSO_TOKEN))
+            _tls.turso = c
+        return c
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
     return c
@@ -92,6 +171,12 @@ def create_user(username, password):
         uid = cur.lastrowid
     except sqlite3.IntegrityError:
         c.close(); return None, "username taken"
+    except Exception as e:
+        # libsql (Turso) raises its own error type for unique violations
+        c.close()
+        if "unique" in str(e).lower():
+            return None, "username taken"
+        raise
     c.execute("INSERT INTO portfolio(user_id, cash, updated_at) VALUES(?,?,?)",
               (uid, 100000, time.time()))
     c.commit(); c.close()
